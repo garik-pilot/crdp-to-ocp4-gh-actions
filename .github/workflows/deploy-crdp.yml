@@ -1,0 +1,201 @@
+# .github/workflows/deploy-crdp.yml
+#
+# Deploys Thales CRDP (CipherTrust RESTful Data Protection) to OCP4 using Helm.
+# Adapted from the GitHub OpenShift starter workflow.
+#
+# Required repository secrets (Settings → Secrets → Actions):
+#   OPENSHIFT_SERVER      - OCP4 API URL, e.g. https://api.cluster.example.com:6443
+#   OPENSHIFT_TOKEN       - Service account token with cluster-admin or targeted RBAC
+#   CTM_HOST              - CipherTrust Manager IP or FQDN
+#   CRDP_REG_TOKEN        - Registration token generated in CTM → App Data Protection
+
+name: Deploy CRDP to OCP4
+
+env:
+  OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
+  OPENSHIFT_TOKEN:  ${{ secrets.OPENSHIFT_TOKEN }}
+  OPENSHIFT_NAMESPACE: "crdp"          # ✏️ Edit: target OCP project/namespace
+  CRDP_RELEASE_NAME: "crdp"           # ✏️ Edit: Helm release name
+  CRDP_IMAGE_TAG: "latest"            # ✏️ Edit: pin to a specific CRDP version tag
+  CRDP_SERVICE_ACCOUNT: "crdp-sa"
+  CRDP_PORT: "8090"                   # CRDP listener port (do not change)
+
+on:
+  workflow_dispatch:                   # Manual trigger from Actions tab
+  push:
+    branches: ["main"]
+    paths:
+      - "helm/crdp/**"                # Only re-deploy when chart files change
+      - ".github/workflows/deploy-crdp.yml"
+
+jobs:
+  deploy-crdp:
+    name: Deploy CRDP to OpenShift
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+
+      # ── STEP 1: Validate secrets exist ────────────────────────────────────
+      # Mirrors the secret-check pattern from the starter template.
+      # Fails fast before doing any cluster work if a secret is missing.
+      - name: Check for required secrets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const required = {
+              OPENSHIFT_SERVER:   `${{ secrets.OPENSHIFT_SERVER }}`,
+              OPENSHIFT_TOKEN:    `${{ secrets.OPENSHIFT_TOKEN }}`,
+              CTM_HOST:           `${{ secrets.CTM_HOST }}`,
+              CRDP_REG_TOKEN:     `${{ secrets.CRDP_REG_TOKEN }}`,
+            };
+            const missing = Object.entries(required)
+              .filter(([k, v]) => !v.trim())
+              .map(([k]) => k);
+            if (missing.length) {
+              core.setFailed(`❌ Missing secrets: ${missing.join(', ')}`);
+            } else {
+              core.info('✅ All required secrets are present');
+            }
+
+      # ── STEP 2: Checkout ──────────────────────────────────────────────────
+      # We need the repo checked out for the Helm chart files
+      # stored under helm/crdp/ (Chart.yaml, values.yaml, templates/).
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # ── STEP 3: Install tooling ───────────────────────────────────────────
+      # Install oc CLI (same action as starter template, pinned to OCP4).
+      # Install Helm 3 — CRDP Chart.yaml uses apiVersion: v2 which requires Helm 3.
+      - name: Install oc CLI
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: 4
+
+      - name: Install Helm 3
+        uses: azure/setup-helm@v4
+        with:
+          version: latest             # or pin: "v3.14.0"
+
+      # ── STEP 4: Install yq for values patching ────────────────────────────
+      # yq is used to safely inject secrets into values.yaml at runtime.
+      # Using sed is fragile; yq understands YAML structure.
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      # ── STEP 5: Log in to OpenShift ───────────────────────────────────────
+      # Same action as the starter template.
+      # insecure_skip_tls_verify: set to false if you have a trusted cert on the API server.
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ env.OPENSHIFT_SERVER }}
+          openshift_token:      ${{ env.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      # ── STEP 6: Create namespace if it doesn't exist ──────────────────────
+      - name: Ensure namespace exists
+        run: |
+          oc new-project ${{ env.OPENSHIFT_NAMESPACE }} 2>/dev/null \
+            || oc project ${{ env.OPENSHIFT_NAMESPACE }}
+
+      # ── STEP 7: OCP4 SCC setup ────────────────────────────────────────────
+      # THIS STEP HAS NO EQUIVALENT IN THE STARTER TEMPLATE.
+      # OCP4's default "restricted" SCC blocks containers that run as a fixed
+      # non-root UID (which the CRDP image does). Granting "anyuid" to the
+      # CRDP service account allows the container to start normally.
+      # Without this step the pod will crash with: "container has runAsNonRoot
+      # and image will run as root".
+      - name: Create CRDP service account and grant anyuid SCC
+        run: |
+          # Create SA idempotently
+          oc create serviceaccount ${{ env.CRDP_SERVICE_ACCOUNT }} \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --dry-run=client -o yaml | oc apply -f -
+
+          # Grant anyuid SCC — requires cluster-admin on the runner token
+          oc adm policy add-scc-to-user anyuid \
+            system:serviceaccount:${{ env.OPENSHIFT_NAMESPACE }}:${{ env.CRDP_SERVICE_ACCOUNT }}
+
+      # ── STEP 8: Patch values.yaml with runtime secrets ───────────────────
+      # Secrets are never committed to the repo. They are injected here
+      # from GitHub secrets into a working copy of values.yaml.
+      # The patched file is only on the runner — it is never stored.
+      - name: Inject CTM credentials into values.yaml
+        env:
+          CTM_HOST:       ${{ secrets.CTM_HOST }}
+          CRDP_REG_TOKEN: ${{ secrets.CRDP_REG_TOKEN }}
+        run: |
+          cp helm/crdp/values.yaml /tmp/values-runtime.yaml
+
+          yq e -i ".kms = \"${CTM_HOST}\""             /tmp/values-runtime.yaml
+          yq e -i ".regToken = \"${CRDP_REG_TOKEN}\""  /tmp/values-runtime.yaml
+          yq e -i ".serviceAccountName = \"${{ env.CRDP_SERVICE_ACCOUNT }}\""  \
+                                                        /tmp/values-runtime.yaml
+          yq e -i ".image.tag = \"${{ env.CRDP_IMAGE_TAG }}\""  \
+                                                        /tmp/values-runtime.yaml
+
+          echo "✅ values.yaml patched (secrets not echoed)"
+
+      # ── STEP 9: Helm deploy ───────────────────────────────────────────────
+      # upgrade --install = install on first run, upgrade on subsequent runs.
+      # --atomic rolls back automatically if the deployment fails.
+      # --wait blocks until pods are Running (or timeout is hit).
+      - name: Helm upgrade --install CRDP
+        run: |
+          helm upgrade --install ${{ env.CRDP_RELEASE_NAME }} ./helm/crdp \
+            --namespace ${{ env.OPENSHIFT_NAMESPACE }} \
+            --values /tmp/values-runtime.yaml \
+            --atomic \
+            --timeout 5m \
+            --set image.repository=thalesciphertrust/ciphertrust-restful-data-protection
+
+      # ── STEP 10: Expose via OCP Route ─────────────────────────────────────
+      # The starter template uses oc-new-app which auto-creates a Route.
+      # For a Helm-deployed Service we create the Route explicitly.
+      # oc expose is idempotent when --dry-run=client pattern is used.
+      - name: Expose CRDP Service as OCP Route
+        run: |
+          oc expose svc/${{ env.CRDP_RELEASE_NAME }} \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --port=${{ env.CRDP_PORT }} \
+            --dry-run=client -o yaml | oc apply -f -
+
+      # ── STEP 11: Verify and print route ───────────────────────────────────
+      # Mirrors the "Print application URL" step from the starter template.
+      # Also checks the CRDP log for the successful registration message.
+      - name: Verify deployment and print Route
+        run: |
+          echo ""
+          echo "=== Pod status ==="
+          oc get pods -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l "app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }}"
+
+          echo ""
+          echo "=== Registration log check ==="
+          POD=$(oc get pod \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l "app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }}" \
+            -o jsonpath='{.items[0].metadata.name}')
+          oc logs "$POD" -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            | grep -i "register" || echo "⚠️  Registration message not found yet — check logs"
+
+          echo ""
+          ROUTE=$(oc get route ${{ env.CRDP_RELEASE_NAME }} \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+          if [[ -z "$ROUTE" ]]; then
+            echo "⚠️  Route not yet available"
+          else
+            echo "============================================================"
+            echo " CRDP is available at: http://${ROUTE}/v1/protect"
+            echo "============================================================"
+          fi
+
+          echo ""
+          echo "To tear down: oc delete all -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }} \
+            -n ${{ env.OPENSHIFT_NAMESPACE }}"
