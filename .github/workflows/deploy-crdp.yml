@@ -115,9 +115,18 @@ jobs:
             -n ${{ env.OPENSHIFT_NAMESPACE }} \
             --dry-run=client -o yaml | oc apply -f -
 
-          # Grant anyuid SCC — requires cluster-admin on the runner token
-          oc adm policy add-scc-to-user anyuid \
-            system:serviceaccount:${{ env.OPENSHIFT_NAMESPACE }}:${{ env.CRDP_SERVICE_ACCOUNT }}
+      - name: STEP 7.1 Get namespace UID range and patch values
+        run: |
+          UID_RANGE=$(oc get namespace ${{ env.OPENSHIFT_NAMESPACE }} \
+          -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}')
+          NAMESPACE_UID=$(echo $UID_RANGE | cut -d'/' -f1)
+          echo "Using UID: $NAMESPACE_UID"
+          yq e -i ".podSecurityContext.runAsUser = ${NAMESPACE_UID}" /tmp/values-runtime.yaml
+          yq e -i ".podSecurityContext.fsGroup = ${NAMESPACE_UID}" /tmp/values-runtime.yaml
+
+      # Grant anyuid SCC — requires cluster-admin on the runner token
+      #oc adm policy add-scc-to-user anyuid \
+      #system:serviceaccount:${{ env.OPENSHIFT_NAMESPACE }}:${{ env.CRDP_SERVICE_ACCOUNT }}
 
       # ── STEP 8: Patch values.yaml with runtime secrets ───────────────────
       # Secrets are never committed to the repo. They are injected here
