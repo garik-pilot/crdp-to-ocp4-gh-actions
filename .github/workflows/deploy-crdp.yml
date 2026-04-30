@@ -121,7 +121,7 @@ jobs:
           -o jsonpath='{.metadata.annotations.openshift\.io/sa\.scc\.uid-range}')
           NAMESPACE_UID=$(echo $UID_RANGE | cut -d'/' -f1)
           echo "Using UID: $NAMESPACE_UID"
-          yq e -i ".podSecurityContext.runAsUser = ${NAMESPACE_UID}" help/crdp/values.yaml
+          yq e -i ".podSecurityContext.runAsUser = ${NAMESPACE_UID}" helm/crdp/values.yaml
           yq e -i ".podSecurityContext.fsGroup = ${NAMESPACE_UID}" helm/crdp/values.yaml
 
       # Grant anyuid SCC — requires cluster-admin on the runner token
