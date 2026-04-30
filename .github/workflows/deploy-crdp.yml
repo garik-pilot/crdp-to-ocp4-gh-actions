@@ -14,7 +14,7 @@ name: Deploy CRDP to OCP4
 env:
   OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}
   OPENSHIFT_TOKEN:  ${{ secrets.OPENSHIFT_TOKEN }}
-  OPENSHIFT_NAMESPACE: "crdp"          # ✏️ Edit: target OCP project/namespace
+  OPENSHIFT_NAMESPACE: "iy-awstest-dev"          # ✏️ Edit: target OCP project/namespace
   CRDP_RELEASE_NAME: "crdp"           # ✏️ Edit: Helm release name
   CRDP_IMAGE_TAG: "latest"            # ✏️ Edit: pin to a specific CRDP version tag
   CRDP_SERVICE_ACCOUNT: "crdp-sa"
@@ -24,9 +24,9 @@ on:
   workflow_dispatch:                   # Manual trigger from Actions tab
   push:
     branches: ["main"]
-    paths:
-      - "helm/crdp/**"                # Only re-deploy when chart files change
-      - ".github/workflows/deploy-crdp.yml"
+    #paths:
+    #  - "helm/crdp/**"                # Only re-deploy when chart files change
+    #  - ".github/workflows/deploy-crdp.yml"
 
 jobs:
   deploy-crdp:
@@ -39,7 +39,7 @@ jobs:
       # ── STEP 1: Validate secrets exist ────────────────────────────────────
       # Mirrors the secret-check pattern from the starter template.
       # Fails fast before doing any cluster work if a secret is missing.
-      - name: Check for required secrets
+      - name: STEP 1 Check for required secrets
         uses: actions/github-script@v7
         with:
           script: |
@@ -61,18 +61,18 @@ jobs:
       # ── STEP 2: Checkout ──────────────────────────────────────────────────
       # We need the repo checked out for the Helm chart files
       # stored under helm/crdp/ (Chart.yaml, values.yaml, templates/).
-      - name: Check out repository
+      - name: STEP 2 Check out repository
         uses: actions/checkout@v4
 
       # ── STEP 3: Install tooling ───────────────────────────────────────────
       # Install oc CLI (same action as starter template, pinned to OCP4).
       # Install Helm 3 — CRDP Chart.yaml uses apiVersion: v2 which requires Helm 3.
-      - name: Install oc CLI
+      - name: STEP 3 Install oc CLI
         uses: redhat-actions/openshift-tools-installer@v1
         with:
           oc: 4
 
-      - name: Install Helm 3
+      - name: STEP 3 Install Helm 3
         uses: azure/setup-helm@v4
         with:
           version: latest             # or pin: "v3.14.0"
@@ -80,7 +80,7 @@ jobs:
       # ── STEP 4: Install yq for values patching ────────────────────────────
       # yq is used to safely inject secrets into values.yaml at runtime.
       # Using sed is fragile; yq understands YAML structure.
-      - name: Install yq
+      - name: STEP 4 Install yq
         run: |
           wget -qO /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
@@ -89,7 +89,7 @@ jobs:
       # ── STEP 5: Log in to OpenShift ───────────────────────────────────────
       # Same action as the starter template.
       # insecure_skip_tls_verify: set to false if you have a trusted cert on the API server.
-      - name: Log in to OpenShift
+      - name: STEP 5 Log in to OpenShift
         uses: redhat-actions/oc-login@v1
         with:
           openshift_server_url: ${{ env.OPENSHIFT_SERVER }}
@@ -97,12 +97,10 @@ jobs:
           insecure_skip_tls_verify: true
           namespace: ${{ env.OPENSHIFT_NAMESPACE }}
 
-      # ── STEP 6: Create namespace if it doesn't exist ──────────────────────
-      - name: Ensure namespace exists
-        run: |
-          oc new-project ${{ env.OPENSHIFT_NAMESPACE }} 2>/dev/null \
-            || oc project ${{ env.OPENSHIFT_NAMESPACE }}
-
+      # ── STEP 6: Switch to target project in OCP4  ──────────────────────
+      - name:  STEP 6 Switch to target project or namespace
+        run: oc project ${{ env.OPENSHIFT_NAMESPACE }}
+      
       # ── STEP 7: OCP4 SCC setup ────────────────────────────────────────────
       # THIS STEP HAS NO EQUIVALENT IN THE STARTER TEMPLATE.
       # OCP4's default "restricted" SCC blocks containers that run as a fixed
@@ -110,7 +108,7 @@ jobs:
       # CRDP service account allows the container to start normally.
       # Without this step the pod will crash with: "container has runAsNonRoot
       # and image will run as root".
-      - name: Create CRDP service account and grant anyuid SCC
+      - name: STEP 7 Create CRDP service account and grant anyuid SCC
         run: |
           # Create SA idempotently
           oc create serviceaccount ${{ env.CRDP_SERVICE_ACCOUNT }} \
@@ -125,7 +123,7 @@ jobs:
       # Secrets are never committed to the repo. They are injected here
       # from GitHub secrets into a working copy of values.yaml.
       # The patched file is only on the runner — it is never stored.
-      - name: Inject CTM credentials into values.yaml
+      - name: STEP 8 Inject CTM credentials into values.yaml
         env:
           CTM_HOST:       ${{ secrets.CTM_HOST }}
           CRDP_REG_TOKEN: ${{ secrets.CRDP_REG_TOKEN }}
@@ -145,7 +143,7 @@ jobs:
       # upgrade --install = install on first run, upgrade on subsequent runs.
       # --atomic rolls back automatically if the deployment fails.
       # --wait blocks until pods are Running (or timeout is hit).
-      - name: Helm upgrade --install CRDP
+      - name: STEP 9 Helm upgrade --install CRDP
         run: |
           helm upgrade --install ${{ env.CRDP_RELEASE_NAME }} ./helm/crdp \
             --namespace ${{ env.OPENSHIFT_NAMESPACE }} \
@@ -158,7 +156,7 @@ jobs:
       # The starter template uses oc-new-app which auto-creates a Route.
       # For a Helm-deployed Service we create the Route explicitly.
       # oc expose is idempotent when --dry-run=client pattern is used.
-      - name: Expose CRDP Service as OCP Route
+      - name: STEP 10 Expose CRDP Service as OCP Route
         run: |
           oc expose svc/${{ env.CRDP_RELEASE_NAME }} \
             -n ${{ env.OPENSHIFT_NAMESPACE }} \
@@ -168,7 +166,7 @@ jobs:
       # ── STEP 11: Verify and print route ───────────────────────────────────
       # Mirrors the "Print application URL" step from the starter template.
       # Also checks the CRDP log for the successful registration message.
-      - name: Verify deployment and print Route
+      - name: STEP 11 Verify deployment and print Route
         run: |
           echo ""
           echo "=== Pod status ==="
