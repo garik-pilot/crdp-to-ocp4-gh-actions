@@ -9,8 +9,8 @@ deployment:
  
 env:
   serverMode: no-tls
-  kms: <IP address of your CipherTrust Manager> 
-  regToken: <Registration token generated on CipherTrust Manager>
+  kms: 127.0.0.1 
+  regToken: 123456789
 
 service:
   name: crdp-service
