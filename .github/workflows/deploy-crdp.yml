@@ -169,6 +169,26 @@ jobs:
             --set image.repository=thalesciphertrust/ciphertrust-restful-data-protection
             --set image.tag=${{ env.CRDP_IMAGE_TAG }} \
             --set image.pullPolicy=Always
+      - name: Debug pod status on failure
+        if: failure()
+        run: |
+          echo "=== Pod list ==="
+          oc get pods -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo "=== Pod describe ==="
+          oc describe pod \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }}
+
+          echo "=== Pod logs ==="
+          oc logs \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }} \
+            --previous 2>/dev/null \
+          || oc logs \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }} \
+          || echo "No logs available yet"
       # ── STEP 10: Expose via OCP Route ─────────────────────────────────────
       # The starter template uses oc-new-app which auto-creates a Route.
       # For a Helm-deployed Service we create the Route explicitly.
