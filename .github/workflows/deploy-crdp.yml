@@ -152,15 +152,23 @@ jobs:
       # upgrade --install = install on first run, upgrade on subsequent runs.
       # --atomic rolls back automatically if the deployment fails.
       # --wait blocks until pods are Running (or timeout is hit).
+      - name: Check pod status for troubleshooting
+        run: |
+          oc get pods -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
+          oc describe pod -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
+          # Check logs if the container at least started
+          oc logs -n iy-awstest-dev -l app.kubernetes.io/instance=crdp --previous 2>/dev/null \
+            || oc logs -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
       - name: STEP 9 Helm upgrade --install CRDP
         run: |
           helm upgrade --install ${{ env.CRDP_RELEASE_NAME }} ./helm/crdp \
             --namespace ${{ env.OPENSHIFT_NAMESPACE }} \
             --values /tmp/values-runtime.yaml \
-            --atomic \
+            --rollback-on-failure \
             --timeout 5m \
             --set image.repository=thalesciphertrust/ciphertrust-restful-data-protection
-
+            --set image.tag=${{ env.CRDP_IMAGE_TAG }} \
+            --set image.pullPolicy=Always
       # ── STEP 10: Expose via OCP Route ─────────────────────────────────────
       # The starter template uses oc-new-app which auto-creates a Route.
       # For a Helm-deployed Service we create the Route explicitly.
