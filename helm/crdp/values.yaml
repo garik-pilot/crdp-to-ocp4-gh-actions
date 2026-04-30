@@ -10,7 +10,7 @@ deployment:
 env:
   serverMode: no-tls
   kms: 127.0.0.1 
-  regToken: 123456789
+  regToken: abc-123-cdf-234
 
 service:
   name: crdp-service
