@@ -152,43 +152,45 @@ jobs:
       # upgrade --install = install on first run, upgrade on subsequent runs.
       # --atomic rolls back automatically if the deployment fails.
       # --wait blocks until pods are Running (or timeout is hit).
-      - name: Check pod status for troubleshooting
-        run: |
-          oc get pods -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
-          oc describe pod -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
-          # Check logs if the container at least started
-          oc logs -n iy-awstest-dev -l app.kubernetes.io/instance=crdp --previous 2>/dev/null \
-            || oc logs -n iy-awstest-dev -l app.kubernetes.io/instance=crdp
       - name: STEP 9 Helm upgrade --install CRDP
         run: |
           helm upgrade --install ${{ env.CRDP_RELEASE_NAME }} ./helm/crdp \
             --namespace ${{ env.OPENSHIFT_NAMESPACE }} \
             --values /tmp/values-runtime.yaml \
-            --rollback-on-failure \
             --timeout 5m \
+            --debug \
             --set image.repository=thalesciphertrust/ciphertrust-restful-data-protection
             --set image.tag=${{ env.CRDP_IMAGE_TAG }} \
             --set image.pullPolicy=Always
-      - name: Debug pod status on failure
-        if: failure()
+          continue-on-error: true
+      # ── STEP 9.1: Debug pod status ─────────────────────────────────────  
+      - name: Step 9.1 Debug pod status
+        if: always()                     # ← always run, not just on failure
         run: |
-          echo "=== Pod list ==="
-          oc get pods -n ${{ env.OPENSHIFT_NAMESPACE }}
+          echo "=== All resources in namespace ==="
+          oc get all -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo "=== Deployment status ==="
+          oc get deployment -n ${{ env.OPENSHIFT_NAMESPACE }}
+          oc describe deployment ${{ env.CRDP_RELEASE_NAME }}-deployment \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} 2>/dev/null \
+          || oc describe deployment -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo "=== ReplicaSet events ==="
+          oc get rs -n ${{ env.OPENSHIFT_NAMESPACE }}
+          oc describe rs -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+          echo "=== Pod list (wide) ==="
+          oc get pods -n ${{ env.OPENSHIFT_NAMESPACE }} -o wide
 
           echo "=== Pod describe ==="
-          oc describe pod \
-            -n ${{ env.OPENSHIFT_NAMESPACE }} \
-            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }}
+          oc describe pods -n ${{ env.OPENSHIFT_NAMESPACE }}
 
-          echo "=== Pod logs ==="
-          oc logs \
-            -n ${{ env.OPENSHIFT_NAMESPACE }} \
-            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }} \
-            --previous 2>/dev/null \
-          || oc logs \
-            -n ${{ env.OPENSHIFT_NAMESPACE }} \
-            -l app.kubernetes.io/instance=${{ env.CRDP_RELEASE_NAME }} \
-          || echo "No logs available yet"
+          echo "=== Events (sorted by time) ==="
+          oc get events -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --sort-by='.lastTimestamp'
+
+
       # ── STEP 10: Expose via OCP Route ─────────────────────────────────────
       # The starter template uses oc-new-app which auto-creates a Route.
       # For a Helm-deployed Service we create the Route explicitly.
