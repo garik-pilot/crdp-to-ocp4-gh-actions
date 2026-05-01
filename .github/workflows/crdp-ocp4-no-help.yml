@@ -27,7 +27,7 @@ on:
     branches: ["crdp-ocp4-no-helm"]
     paths:
       - "k8s/crdp/**"
-      - ".github/workflows/deploy-crdp-openshift.yml"
+      - ".github/workflows/crdp-ocp4-no-helm.yml"
 
 jobs:
   deploy:
