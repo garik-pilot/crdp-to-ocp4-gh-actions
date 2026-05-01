@@ -1,0 +1,14 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: crdp
+  namespace: iy-awstest-dev
+spec:
+  to:
+    kind: Service
+    name: crdp
+  port:
+    targetPort: http
+  tls:
+    termination: edge        # OCP terminates TLS at the router
+    insecureEdgeTerminationPolicy: Redirect

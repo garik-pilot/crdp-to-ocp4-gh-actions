@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: crdp
+  namespace: iy-awstest-dev
+  labels:
+    app: crdp
+spec:
+  selector:
+    app: crdp
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+  type: ClusterIP          # Route handles external access on OCP4

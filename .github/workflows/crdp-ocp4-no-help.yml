@@ -1,0 +1,168 @@
+# .github/workflows/deploy-crdp-openshift.yml
+#
+# Deploys Thales CRDP to OCP4 using raw oc apply (no Helm).
+# Follows the Thales "Deploy on OpenShift" alternative method:
+# https://docs-cybersec.thalesgroup.com/bundle/latest-cdsp-crdp/page/admin/crdp-deploy_alternative/deploy-openshift/index.html
+#
+# Required repository secrets:
+#   OPENSHIFT_SERVER   - OCP4 API URL  e.g. https://api.cluster.example.com:6443
+#   OPENSHIFT_TOKEN    - Service account or user token
+#   CTM_HOST           - CipherTrust Manager IP or FQDN
+#   CRDP_REG_TOKEN     - Registration token from CTM → App Data Protection
+
+name: Deploy CRDP to OCP4 (no Helm)
+
+env:
+  OPENSHIFT_SERVER:    ${{ secrets.OPENSHIFT_SERVER }}
+  OPENSHIFT_TOKEN:     ${{ secrets.OPENSHIFT_TOKEN }}
+  OPENSHIFT_NAMESPACE: "iy-awstest-dev"     # ✏️ your OCP project
+  CRDP_SA:             "crdp-sa"
+  CRDP_SECRET_NAME:    "crdp-secret"
+  CRDP_IMAGE:          "thalesciphertrust/ciphertrust-restful-data-protection:latest"
+  MANIFEST_DIR:        "k8s/crdp"
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["crdp-ocp4-no-helm"]
+    paths:
+      - "k8s/crdp/**"
+      - ".github/workflows/deploy-crdp-openshift.yml"
+
+jobs:
+  deploy:
+    name: Deploy CRDP via oc apply
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+
+      # ── 1. Validate secrets ──────────────────────────────────────────────
+      - name: Check required secrets
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const required = {
+              OPENSHIFT_SERVER: `${{ secrets.OPENSHIFT_SERVER }}`,
+              OPENSHIFT_TOKEN:  `${{ secrets.OPENSHIFT_TOKEN }}`,
+              CTM_HOST:         `${{ secrets.CTM_HOST }}`,
+              CRDP_REG_TOKEN:   `${{ secrets.CRDP_REG_TOKEN }}`,
+            };
+            const missing = Object.entries(required)
+              .filter(([, v]) => !v.trim())
+              .map(([k]) => k);
+            if (missing.length)
+              core.setFailed(`❌ Missing secrets: ${missing.join(', ')}`);
+            else
+              core.info('✅ All secrets present');
+
+      # ── 2. Checkout ──────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 3. Install oc CLI ────────────────────────────────────────────────
+      - name: Install oc
+        uses: redhat-actions/openshift-tools-installer@v1
+        with:
+          oc: 4
+
+      # ── 4. Login to OpenShift ────────────────────────────────────────────
+      - name: Log in to OpenShift
+        uses: redhat-actions/oc-login@v1
+        with:
+          openshift_server_url: ${{ env.OPENSHIFT_SERVER }}
+          openshift_token:      ${{ env.OPENSHIFT_TOKEN }}
+          insecure_skip_tls_verify: true
+          namespace: ${{ env.OPENSHIFT_NAMESPACE }}
+
+      # ── 5. Create service account ────────────────────────────────────────
+      # anyuid SCC must be pre-granted by cluster admin:
+      #   oc adm policy add-scc-to-user anyuid \
+      #     system:serviceaccount:iy-awstest-dev:crdp-sa
+      - name: Create service account (idempotent)
+        run: |
+          oc create serviceaccount ${{ env.CRDP_SA }} \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --dry-run=client -o yaml | oc apply -f -
+
+      # ── 6. Create/update Kubernetes Secret with CTM credentials ──────────
+      # This is the key difference from Helm: credentials go into a Secret,
+      # and the Deployment reads them via secretKeyRef (not plain env vars).
+      # oc create secret --dry-run=client | oc apply  → fully idempotent.
+      - name: Create CRDP credentials secret
+        env:
+          CTM_HOST:       ${{ secrets.CTM_HOST }}
+          CRDP_REG_TOKEN: ${{ secrets.CRDP_REG_TOKEN }}
+        run: |
+          oc create secret generic ${{ env.CRDP_SECRET_NAME }} \
+            --from-literal=kms="${CTM_HOST}" \
+            --from-literal=regToken="${CRDP_REG_TOKEN}" \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --dry-run=client -o yaml | oc apply -f -
+          echo "✅ Secret applied (values not echoed)"
+
+      # ── 7. Apply manifests ───────────────────────────────────────────────
+      # Applies Deployment, Service, and Route in one shot.
+      # oc apply is idempotent — safe to re-run on every push.
+      - name: Apply CRDP manifests
+        run: |
+          oc apply -f ${{ env.MANIFEST_DIR }}/ \
+            -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+      # ── 8. Force pod restart to pick up secret changes ───────────────────
+      # If only the Secret changed (not the Deployment spec), pods won't
+      # automatically restart. This rollout restart ensures they always do.
+      - name: Rollout restart to apply latest config
+        run: |
+          oc rollout restart deployment/crdp \
+            -n ${{ env.OPENSHIFT_NAMESPACE }}
+
+      # ── 9. Wait for rollout to complete ─────────────────────────────────
+      - name: Wait for rollout
+        run: |
+          oc rollout status deployment/crdp \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --timeout=5m
+
+      # ── 10. Debug on failure ─────────────────────────────────────────────
+      - name: Debug pod status on failure
+        if: failure()
+        run: |
+          echo "=== Pod list ==="
+          oc get pods -n ${{ env.OPENSHIFT_NAMESPACE }} -l app=crdp
+
+          echo "=== Pod describe ==="
+          oc describe pods -n ${{ env.OPENSHIFT_NAMESPACE }} -l app=crdp
+
+          echo "=== Pod logs ==="
+          oc logs -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l app=crdp --previous 2>/dev/null \
+          || oc logs -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -l app=crdp \
+          || echo "No logs yet"
+
+          echo "=== Events ==="
+          oc get events -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            --sort-by='.lastTimestamp' | tail -20
+
+      # ── 11. Print route URL ──────────────────────────────────────────────
+      - name: Print CRDP route
+        run: |
+          ROUTE=$(oc get route crdp \
+            -n ${{ env.OPENSHIFT_NAMESPACE }} \
+            -o jsonpath='{.spec.host}' 2>/dev/null || echo "")
+
+          if [[ -z "$ROUTE" ]]; then
+            echo "⚠️  Route not available yet"
+          else
+            echo ""
+            echo "================================================="
+            echo " CRDP endpoint: https://${ROUTE}/v1/protect"
+            echo " Health check:  https://${ROUTE}/v1/ping"
+            echo "================================================="
+            echo ""
+            echo "Test with:"
+            echo "  curl https://${ROUTE}/v1/protect \\"
+            echo "    -X POST -H 'Content-Type: application/json' \\"
+            echo "    -d '{\"protection_policy_name\": \"protect-credit-card\", \"data\": \"4111111111111111\"}'"
+          fi
